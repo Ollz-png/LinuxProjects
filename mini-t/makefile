@@ -3,35 +3,43 @@ CXX = g++
 CXXFLAGS = -std=c++17 -Wall -Wextra -Wshadow -g `pkg-config --cflags gtk+-3.0 vte-2.91`
 LDFLAGS = `pkg-config --libs gtk+-3.0 vte-2.91`
 
+# Directories
+SRC_DIR = src
+OBJ_DIR = obj
+INCLUDE_DIR = include
+
 # Source files
-SRC := $(wildcard src/*.cpp)
-OBJ := $(SRC:.cpp=.o)
+SRCS := $(wildcard $(SRC_DIR)/*.cpp)
+OBJ := $(patsubst $(SRC_DIR)/%.cpp,$(OBJ_DIR)/%.o,$(SRCS))
 DEP := $(OBJ:.o=.d)   # dependency files
 
-# Include path
-INCLUDES = -Iinclude
-
-# Target
+# Target executable
 TARGET = mini-t
 
 # Default rule
 all: $(TARGET)
 
 # Compile object files with dependency generation
-%.o: %.cpp
-	$(CXX) $(CXXFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp | $(OBJ_DIR)
+	$(CXX) $(CXXFLAGS) -I$(INCLUDE_DIR) -MMD -MP -c $< -o $@
+
+# Ensure obj directory exists
+$(OBJ_DIR):
+	mkdir -p $(OBJ_DIR)
 
 # Link executable
 $(TARGET): $(OBJ)
 	$(CXX) $(OBJ) -o $(TARGET) $(LDFLAGS)
 
-# Include dependency files if they exist
+# Include dependency files
 -include $(DEP)
 
 # Clean build
 clean:
-	rm -f $(OBJ) $(DEP) $(TARGET)
+	rm -rf $(OBJ_DIR) $(DEP) $(TARGET)
 
 # Run
 run: $(TARGET)
 	./$(TARGET)
+
+.PHONY: all clean run

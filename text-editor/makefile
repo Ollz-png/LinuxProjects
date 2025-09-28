@@ -1,44 +1,44 @@
 # Compiler and flags
 CXX = g++
-CXXFLAGS = -std=c++17 -Wall -Wextra -Wshadow -g `pkg-config --cflags gtk+-3.0 vte-2.91`
-LDFLAGS  = `pkg-config --libs gtk+-3.0 vte-2.91`
+CXXFLAGS = -std=c++17 -Wall -Wextra -Wshadow -g `pkg-config --cflags gtk+-3.0 vte-2.91 gtksourceview-3.0`
+LDFLAGS = `pkg-config --libs gtk+-3.0 vte-2.91 gtksourceview-3.0`
 
 # Directories
 SRC_DIR = src
 OBJ_DIR = obj
 INCLUDE_DIR = include
 
-# Source files
+# Sources/Objects/Deps
 SRCS := $(wildcard $(SRC_DIR)/*.cpp)
 OBJ := $(patsubst $(SRC_DIR)/%.cpp,$(OBJ_DIR)/%.o,$(SRCS))
 DEP := $(OBJ:.o=.d)
 
 # Target executable
-TARGET = file-manager
+TARGET = text-edit
 
-# Default rule
+# Default target
 all: $(TARGET)
 
-# Compile object files with dependency generation
+# Compile with dependency generation
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.cpp | $(OBJ_DIR)
 	$(CXX) $(CXXFLAGS) -I$(INCLUDE_DIR) -MMD -MP -c $< -o $@
 
-# Ensure obj directory exists
+# Ensure obj folder exists
 $(OBJ_DIR):
 	mkdir -p $(OBJ_DIR)
 
-# Link executable
+# Link
 $(TARGET): $(OBJ)
 	$(CXX) $(OBJ) -o $(TARGET) $(LDFLAGS)
 
 # Include dependency files
 -include $(DEP)
 
-# Clean build
+# Clean
 clean:
 	rm -rf $(OBJ_DIR) $(DEP) $(TARGET)
 
-# Run program
+# Run
 run: $(TARGET)
 	./$(TARGET)
 
