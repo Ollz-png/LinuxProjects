@@ -1,4 +1,3 @@
-```yaml
 name: Build C++ Projects
 
 on:
@@ -132,4 +131,3 @@ jobs:
           name: compiled-projects-${{ github.run_number }}
           path: bin
           if-no-files-found: error
-```
