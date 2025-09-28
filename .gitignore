@@ -1,0 +1,14 @@
+# Binaries
+**/bin/
+
+# Editor backups
+*~
+*.swp
+*.o
+
+# IDE/project configs
+**/.vscode/
+**/.idea/
+
+# FNF mods builds (optional)
+**/Builds/
