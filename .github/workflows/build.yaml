@@ -62,7 +62,7 @@ jobs:
             else
               OUT_BIN="bin/$project/$project"
               echo "Compiling $project from source..."
-              if g++ -std=c++17 -Wall -Iinclude $CPP_FILES -o "$OUT_BIN" $(pkg-config --cflags --libs gtk+-3.0 vte-2.91); then
+              if g++ -std=c++17 -Wall -Iinclude $(find "$dir" -type f -name "*.cpp") -o "$OUT_BIN" $(pkg-config --cflags --libs gtk+-3.0 vte-2.91); then
                 SUCCEEDED="$SUCCEEDED $project"
               else
                 echo "g++ failed for $project"
