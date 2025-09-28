@@ -1,0 +1,38 @@
+name: Build C++ Projects
+
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:  # allows manual triggering
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repo
+      uses: actions/checkout@v3
+
+    - name: Install dependencies
+      run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libgtk-3-dev libvte-2.91-dev
+
+    - name: Build all C++ projects
+      run: |
+        mkdir -p bin
+        for dir in $(find . -maxdepth 2 -type d); do
+          if compgen -G "$dir/src/*.cpp" > /dev/null; then
+            project=$(basename $dir)
+            mkdir -p bin/$project
+            g++ -std=c++17 -Wall $dir/src/*.cpp -o bin/$project/$project $(pkg-config --cflags --libs gtk+-3.0 vte-2.91)
+          fi
+        done
+
+    - name: Zip binaries
+      run: zip -r compiled_projects.zip bin
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: compiled-projects
+        path: compiled_projects.zip
