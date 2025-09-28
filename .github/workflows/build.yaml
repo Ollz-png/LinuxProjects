@@ -13,8 +13,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Install dependencies
+      # Step 1: Hard-coded core dependencies
+      - name: Install base dependencies
         run: |
+          echo "::group::📦 Installing base dependencies"
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential \
@@ -22,55 +24,97 @@ jobs:
             libgtk-3-dev \
             libvte-2.91-dev \
             libgtksourceview-4-dev
+          echo "::endgroup::"
+
+      # Step 2: Scan Makefiles for pkg-config modules
+      - name: Install dependencies from Makefiles
+        run: |
+          set -eu
+
+          echo "::group::🔍 Scanning Makefiles for pkg-config modules"
+          MODULES=$(grep -h -o "pkg-config[^)]*)" $(find . -name Makefile) \
+            | sed -E 's/.*pkg-config[^ ]* (.*)\)/\1/' \
+            | tr ' ' '\n' | sort -u || true)
+
+          if [ -z "$MODULES" ]; then
+            echo "⚠️  No pkg-config modules detected in Makefiles"
+            echo "::endgroup::"
+            exit 0
+          fi
+
+          echo "📦 Detected pkg-config modules:"
+          for m in $MODULES; do echo "  - $m"; done
+          echo "::endgroup::"
+
+          PKGS=()
+          for m in $MODULES; do
+            case "$m" in
+              gtk+-3.0) PKGS+=("libgtk-3-dev") ;;
+              vte-2.91) PKGS+=("libvte-2.91-dev") ;;
+              gtksourceview-4) PKGS+=("libgtksourceview-4-dev") ;;
+              *) echo "⚠️  Unknown module: $m (no apt mapping)" ;;
+            esac
+          done
+
+          if [ ${#PKGS[@]} -gt 0 ]; then
+            echo "::group::📦 Installing extra packages"
+            echo "Will install: ${PKGS[*]}"
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends "${PKGS[@]}"
+            echo "::endgroup::"
+          else
+            echo "⚠️  No additional packages to install"
+          fi
 
       - name: Compile projects with summary
         shell: bash
         run: |
           set -eu -o pipefail
 
-          # Clean bin folder
           rm -rf bin
           mkdir -p bin
 
           SUCCEEDED=()
           FAILED=()
+          SKIPPED=()
 
-          # Colors
           RED="\033[0;31m"
           GREEN="\033[0;32m"
           YELLOW="\033[0;33m"
           NC="\033[0m"
 
-          # Loop over projects
           while IFS= read -r -d '' dir; do
             dir="${dir#./}"
             [[ "$dir" = ".github" || "$dir" = "bin" || "$dir" = ".git" ]] && continue
 
             project="$dir"
-            echo "=== Processing project: $project ==="
+            echo "::group::🔨 Building project: $project"
 
-            # Find .cpp files
             mapfile -d '' -t CPP_FILES < <(find "$dir" -type f -name '*.cpp' -print0 || true)
 
-            # Skip empty projects
             if [ "${#CPP_FILES[@]}" -eq 0 ] && [ ! -f "$dir/Makefile" ]; then
-              echo -e "${YELLOW}Skipping $project (no .cpp files or Makefile found)${NC}"
+              echo -e "⚠️  ${YELLOW}Skipping${NC}: $project (no .cpp files or Makefile)"
+              SKIPPED+=("$project")
+              echo "::endgroup::"
               continue
             fi
 
             mkdir -p "bin/$project"
 
             if [ -f "$dir/Makefile" ]; then
-              echo "Building $project using Makefile..."
+              echo "🛠️  Building with Makefile..."
               if make -C "$dir"; then
                 find "$dir" -maxdepth 1 -type f -executable -exec mv -t "bin/$project" -- {} + 2>/dev/null || true
+                echo -e "✅ ${GREEN}Build succeeded${NC}: $project"
                 SUCCEEDED+=("$project")
               else
-                echo -e "${RED}Make failed for $project${NC}"
+                echo -e "❌ ${RED}Build failed${NC}: $project"
                 FAILED+=("$project")
               fi
             else
-              # Collect header dirs
+              echo "🛠️  Compiling sources directly..."
+              OUT_BIN="bin/$project/$project"
+
               readarray -d '' -t HEADER_DIRS < <(find "$dir" -type f \( -name '*.h' -o -name '*.hpp' \) -printf '%h\0' 2>/dev/null | sort -uz || true)
 
               INCLUDES_ORDER=()
@@ -84,55 +128,45 @@ jobs:
 
               [ -d "$dir/include" ] && add_if_missing "$dir/include"
               [ -d "./include" ] && add_if_missing "$(realpath -m ./include)"
-
               for hdr in "${HEADER_DIRS[@]}"; do
                 [ -z "$hdr" ] && continue
                 hdr_real=$(realpath -m "$hdr")
                 add_if_missing "$hdr_real"
               done
 
-              if [ "${#INCLUDES_ORDER[@]}" -eq 0 ]; then
-                [ -d "$dir/include" ] && INCLUDES_ORDER+=("$(realpath -m "$dir/include")")
-                [ -d "./include" ] && INCLUDES_ORDER+=("$(realpath -m ./include)")
-              fi
-
               INCLUDES_FLAGS=()
               for p in "${INCLUDES_ORDER[@]}"; do
                 INCLUDES_FLAGS+=("-I" "$p")
               done
-
-              OUT_BIN="bin/$project/$project"
-              echo "Compiling $project from source..."
 
               if g++ -std=c++17 -Wall \
                 "${INCLUDES_FLAGS[@]}" \
                 "${CPP_FILES[@]}" \
                 -o "$OUT_BIN" \
                 $(pkg-config --cflags --libs gtk+-3.0 vte-2.91 gtksourceview-4); then
+                echo -e "✅ ${GREEN}Compiled successfully${NC}: $project"
                 SUCCEEDED+=("$project")
               else
-                echo -e "${RED}g++ failed for $project${NC}"
+                echo -e "❌ ${RED}g++ compilation failed${NC}: $project"
                 FAILED+=("$project")
               fi
             fi
+
+            echo "::endgroup::"
           done < <(find . -maxdepth 1 -mindepth 1 -type d -print0)
 
-          # Summary
           echo
-          echo "=== Build Summary ==="
-          if [ ${#SUCCEEDED[@]} -gt 0 ]; then
-            echo -e "${GREEN}Succeeded projects:${NC} ${SUCCEEDED[*]}"
-          else
-            echo -e "${YELLOW}No projects succeeded.${NC}"
-          fi
+          echo "=== 📊 Build Summary ==="
+          [ ${#SUCCEEDED[@]} -gt 0 ] && echo -e "✅ ${GREEN}Succeeded:${NC} ${SUCCEEDED[*]}"
+          [ ${#FAILED[@]} -gt 0 ] && echo -e "❌ ${RED}Failed:${NC} ${FAILED[*]}"
+          [ ${#SKIPPED[@]} -gt 0 ] && echo -e "⚠️  ${YELLOW}Skipped:${NC} ${SKIPPED[*]}"
 
           if [ ${#FAILED[@]} -gt 0 ]; then
-            echo -e "${RED}Failed projects:${NC} ${FAILED[*]}"
             exit 1
           fi
 
           echo
-          echo "Built projects folder structure:"
+          echo "📂 Built projects folder structure:"
           ls -R bin || true
 
       - name: Upload compiled binaries
