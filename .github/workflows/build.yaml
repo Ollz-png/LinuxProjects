@@ -20,7 +20,7 @@ jobs:
         sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config libgtk-3-dev libvte-2.91-dev
 
-    - name: Compile projects
+    - name: Compile projects with summary
       shell: bash
       run: |
         set -eu -o pipefail
@@ -29,12 +29,13 @@ jobs:
         rm -rf bin
         mkdir -p bin
 
+        SUCCEEDED=""
         FAILED=""
-        BUILT_ANY=0
 
         # Loop over top-level directories (exclude .github and bin)
         for dir in $(find . -maxdepth 1 -mindepth 1 -type d | sed 's|^\./||'); do
           [ "$dir" = ".github" ] && continue
+          [ "$dir" = "bin" ] && continue
           project=$(basename "$dir")
           mkdir -p "bin/$project"
 
@@ -42,16 +43,14 @@ jobs:
 
           if [ -f "$dir/Makefile" ]; then
             echo "Building $project using Makefile..."
-            if ! make -C "$dir"; then
+            if make -C "$dir"; then
+              find "$dir" -maxdepth 1 -type f -executable -exec mv {} "bin/$project/" \;
+              SUCCEEDED="$SUCCEEDED $project"
+            else
               echo "Make failed for $project"
               FAILED="$FAILED $project"
-              continue
             fi
-            # Move executables from project root to bin/<project>/
-            find "$dir" -maxdepth 1 -type f -executable -exec mv {} "bin/$project/" \;
-
           else
-            # Compile all .cpp files recursively
             CPP_FILES=$(find "$dir" -type f -name "*.cpp")
             if [ -z "$CPP_FILES" ]; then
               echo "No .cpp files found for $project"
@@ -60,24 +59,30 @@ jobs:
             fi
             OUT_BIN="bin/$project/$project"
             echo "Compiling $project from source..."
-            if ! g++ -std=c++17 -Wall $CPP_FILES -o "$OUT_BIN" $(pkg-config --cflags --libs gtk+-3.0 vte-2.91); then
+            if g++ -std=c++17 -Wall $CPP_FILES -o "$OUT_BIN" $(pkg-config --cflags --libs gtk+-3.0 vte-2.91); then
+              SUCCEEDED="$SUCCEEDED $project"
+            else
               echo "g++ failed for $project"
               FAILED="$FAILED $project"
-              continue
             fi
           fi
-
-          BUILT_ANY=1
         done
 
-        if [ "$BUILT_ANY" -eq 0 ]; then
-          echo "ERROR: No binaries were produced for any project."
-          echo "Failed projects:$FAILED"
+        echo
+        echo "=== Build Summary ==="
+        if [ -n "$SUCCEEDED" ]; then
+          echo "✅ Succeeded projects:$SUCCEEDED"
+        else
+          echo "⚠️ No projects succeeded."
+        fi
+
+        if [ -n "$FAILED" ]; then
+          echo "❌ Failed projects:$FAILED"
           exit 1
         fi
 
-        echo "=== Build complete ==="
-        echo "Built projects (bin/<project>/):"
+        echo
+        echo "Built projects folder structure:"
         ls -R bin || true
 
     - name: Upload compiled binaries
