@@ -9,121 +9,131 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Install base build tools
+      - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config
+            build-essential \
+            pkg-config \
+            libgtk-3-dev \
+            libvte-2.91-dev \
+            libgtksourceview-4-dev
 
-      - name: Compile projects with auto-detected packages
+      - name: Compile projects with summary
         shell: bash
         run: |
           set -eu -o pipefail
 
-          # Map pkg-config modules → Ubuntu dev packages
-          declare -A PKG_MAP=(
-            [gtk+-3.0]=libgtk-3-dev
-            [vte-2.91]=libvte-2.91-dev
-            [gtksourceview-3.0]=libgtksourceview-3.0-dev
-          )
+          # Clean bin folder
+          rm -rf bin
+          mkdir -p bin
 
           SUCCEEDED=()
           FAILED=()
 
-          mkdir -p bin
+          # Colors
+          RED="\033[0;31m"
+          GREEN="\033[0;32m"
+          YELLOW="\033[0;33m"
+          NC="\033[0m"
 
-          # Top-level projects (ignore .github, bin, .git)
+          # Loop over projects
           while IFS= read -r -d '' dir; do
             dir="${dir#./}"
             [[ "$dir" = ".github" || "$dir" = "bin" || "$dir" = ".git" ]] && continue
+
             project="$dir"
             echo "=== Processing project: $project ==="
 
-            # Find sources
-            mapfile -t SRCFILES < <(find "$project" -type f -name '*.cpp')
-            if [ ${#SRCFILES[@]} -eq 0 ] && [ ! -f "$project/Makefile" ]; then
-              echo "Skipping $project (no sources or Makefile)"
+            # Find .cpp files
+            mapfile -d '' -t CPP_FILES < <(find "$dir" -type f -name '*.cpp' -print0 || true)
+
+            # Skip empty projects
+            if [ "${#CPP_FILES[@]}" -eq 0 ] && [ ! -f "$dir/Makefile" ]; then
+              echo -e "${YELLOW}Skipping $project (no .cpp files or Makefile found)${NC}"
               continue
             fi
 
             mkdir -p "bin/$project"
 
-            if [ -f "$project/Makefile" ]; then
-              echo "Building $project with Makefile..."
-              if make -C "$project"; then
-                find "$project" -maxdepth 1 -type f -executable \
-                  -exec mv -t "bin/$project" {} + 2>/dev/null || true
+            if [ -f "$dir/Makefile" ]; then
+              echo "Building $project using Makefile..."
+              if make -C "$dir"; then
+                find "$dir" -maxdepth 1 -type f -executable -exec mv -t "bin/$project" -- {} + 2>/dev/null || true
                 SUCCEEDED+=("$project")
               else
-                echo "Make failed for $project"
+                echo -e "${RED}Make failed for $project${NC}"
                 FAILED+=("$project")
               fi
-              continue
-            fi
-
-            # Detect needed pkg-config modules from includes
-            needed_pkgs=()
-            for src in "${SRCFILES[@]}"; do
-              if grep -qE '#\s*include\s*<gtk/gtk.h>' "$src"; then
-                needed_pkgs+=("gtk+-3.0")
-              fi
-              if grep -qE '#\s*include\s*<vte/vte.h>' "$src"; then
-                needed_pkgs+=("vte-2.91")
-              fi
-              if grep -qE '#\s*include\s*<gtksourceview/gtksource.h>' "$src"; then
-                needed_pkgs+=("gtksourceview-3.0")
-              fi
-            done
-            needed_pkgs=($(printf "%s\n" "${needed_pkgs[@]}" | sort -u))
-
-            # Install missing dev packages
-            to_install=()
-            for pkg in "${needed_pkgs[@]}"; do
-              if ! pkg-config --exists "$pkg"; then
-                to_install+=("${PKG_MAP[$pkg]}")
-              fi
-            done
-            if [ ${#to_install[@]} -gt 0 ]; then
-              echo "Installing missing packages: ${to_install[*]}"
-              sudo apt-get install -y --no-install-recommends "${to_install[@]}"
-            fi
-
-            # Collect include dirs
-            INCLUDE_DIRS=()
-            [ -d "$project/include" ] && INCLUDE_DIRS+=("-I$project/include")
-            [ -d "include" ] && INCLUDE_DIRS+=("-Iinclude")
-
-            OUTBIN="bin/$project/$project"
-            PKG_FLAGS=""
-            if [ ${#needed_pkgs[@]} -gt 0 ]; then
-              PKG_FLAGS="$(pkg-config --cflags --libs ${needed_pkgs[*]})"
-            fi
-
-            echo "Compiling $project..."
-            if g++ -std=c++17 -Wall "${SRCFILES[@]}" "${INCLUDE_DIRS[@]}" $PKG_FLAGS -o "$OUTBIN"; then
-              SUCCEEDED+=("$project")
             else
-              echo "g++ failed for $project"
-              FAILED+=("$project")
+              # Collect header dirs
+              readarray -d '' -t HEADER_DIRS < <(find "$dir" -type f \( -name '*.h' -o -name '*.hpp' \) -printf '%h\0' 2>/dev/null | sort -uz || true)
+
+              INCLUDES_ORDER=()
+              add_if_missing() {
+                local candidate="$1"
+                for e in "${INCLUDES_ORDER[@]}"; do
+                  [ "$e" = "$candidate" ] && return 0
+                done
+                INCLUDES_ORDER+=("$candidate")
+              }
+
+              [ -d "$dir/include" ] && add_if_missing "$dir/include"
+              [ -d "./include" ] && add_if_missing "$(realpath -m ./include)"
+
+              for hdr in "${HEADER_DIRS[@]}"; do
+                [ -z "$hdr" ] && continue
+                hdr_real=$(realpath -m "$hdr")
+                add_if_missing "$hdr_real"
+              done
+
+              if [ "${#INCLUDES_ORDER[@]}" -eq 0 ]; then
+                [ -d "$dir/include" ] && INCLUDES_ORDER+=("$(realpath -m "$dir/include")")
+                [ -d "./include" ] && INCLUDES_ORDER+=("$(realpath -m ./include)")
+              fi
+
+              INCLUDES_FLAGS=()
+              for p in "${INCLUDES_ORDER[@]}"; do
+                INCLUDES_FLAGS+=("-I" "$p")
+              done
+
+              OUT_BIN="bin/$project/$project"
+              echo "Compiling $project from source..."
+
+              if g++ -std=c++17 -Wall \
+                "${INCLUDES_FLAGS[@]}" \
+                "${CPP_FILES[@]}" \
+                -o "$OUT_BIN" \
+                $(pkg-config --cflags --libs gtk+-3.0 vte-2.91 gtksourceview-4); then
+                SUCCEEDED+=("$project")
+              else
+                echo -e "${RED}g++ failed for $project${NC}"
+                FAILED+=("$project")
+              fi
             fi
           done < <(find . -maxdepth 1 -mindepth 1 -type d -print0)
 
+          # Summary
           echo
           echo "=== Build Summary ==="
           if [ ${#SUCCEEDED[@]} -gt 0 ]; then
-            echo "Succeeded projects: ${SUCCEEDED[*]}"
+            echo -e "${GREEN}Succeeded projects:${NC} ${SUCCEEDED[*]}"
           else
-            echo "No projects succeeded."
+            echo -e "${YELLOW}No projects succeeded.${NC}"
           fi
+
           if [ ${#FAILED[@]} -gt 0 ]; then
-            echo "Failed projects: ${FAILED[*]}"
+            echo -e "${RED}Failed projects:${NC} ${FAILED[*]}"
             exit 1
           fi
+
+          echo
+          echo "Built projects folder structure:"
+          ls -R bin || true
 
       - name: Upload compiled binaries
         uses: actions/upload-artifact@v4
