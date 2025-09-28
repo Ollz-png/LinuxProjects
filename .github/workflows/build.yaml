@@ -1,81 +1,97 @@
 name: Build C++ Projects
+
 on:
   push:
     branches:
       - master
   workflow_dispatch:
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout repository
       uses: actions/checkout@v3
+
     - name: Install dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config libgtk-3-dev libvte-2.91-dev
+
     - name: Compile projects with summary
       shell: bash
       run: |
         set -eu -o pipefail
+
         # Clean bin folder
         rm -rf bin
         mkdir -p bin
-        SUCCEEDED=""
-        FAILED=""
-        # Loop over top-level directories (exclude .github and bin)
+
+        SUCCEEDED=()
+        FAILED=()
+
+        # Colors
+        RED="\033[0;31m"
+        GREEN="\033[0;32m"
+        YELLOW="\033[0;33m"
+        NC="\033[0m" # No Color
+
+        # Loop over top-level directories (exclude .github, bin, .git)
         for dir in $(find . -maxdepth 1 -mindepth 1 -type d | sed 's|^\./||'); do
-          [ "$dir" = ".github" ] && continue
-          [ "$dir" = "bin" ] && continue
-          [ "$dir" = ".git" ] && continue
-          
-          project=$(basename "$dir")
-          
-          # Check if directory contains any .cpp files first
-          CPP_FILES=$(find "$dir" -type f -name "*.cpp" 2>/dev/null || true)
-          if [ -z "$CPP_FILES" ] && [ ! -f "$dir/Makefile" ]; then
-            echo "Skipping $project (no .cpp files or Makefile found)"
+          [[ "$dir" =~ ^(\.github|bin|\.git)$ ]] && continue
+
+          project="$dir"
+
+          # Recursively find all .cpp files
+          mapfile -t CPP_FILES < <(find "$dir" -type f -name "*.cpp")
+          if [ ${#CPP_FILES[@]} -eq 0 ] && [ ! -f "$dir/Makefile" ]; then
+            echo -e "${YELLOW}Skipping $project (no .cpp files or Makefile found)${NC}"
             continue
           fi
-          
+
           mkdir -p "bin/$project"
           echo "=== Processing project: $project ==="
-          
+
           if [ -f "$dir/Makefile" ]; then
             echo "Building $project using Makefile..."
             if make -C "$dir"; then
               find "$dir" -maxdepth 1 -type f -executable -exec mv {} "bin/$project/" \;
-              SUCCEEDED="$SUCCEEDED $project"
+              SUCCEEDED+=("$project")
             else
-              echo "Make failed for $project"
-              FAILED="$FAILED $project"
+              echo -e "${RED}Make failed for $project${NC}"
+              FAILED+=("$project")
             fi
           else
             OUT_BIN="bin/$project/$project"
             echo "Compiling $project from source..."
-            if g++ -std=c++17 -Wall $CPP_FILES -o "$OUT_BIN" $(pkg-config --cflags --libs gtk+-3.0 vte-2.91); then
-              SUCCEEDED="$SUCCEEDED $project"
+            if g++ -std=c++17 -Wall "${CPP_FILES[@]}" -o "$OUT_BIN" $(pkg-config --cflags --libs gtk+-3.0 vte-2.91); then
+              SUCCEEDED+=("$project")
             else
-              echo "g++ failed for $project"
-              FAILED="$FAILED $project"
+              echo -e "${RED}g++ failed for $project${NC}"
+              FAILED+=("$project")
             fi
           fi
         done
+
+        # Build summary
         echo
         echo "=== Build Summary ==="
-        if [ -n "$SUCCEEDED" ]; then
-          echo "✅ Succeeded projects:$SUCCEEDED"
+        if [ ${#SUCCEEDED[@]} -gt 0 ]; then
+          echo -e "${GREEN}Succeeded projects:${NC} ${SUCCEEDED[*]}"
         else
-          echo "⚠️ No projects succeeded."
+          echo -e "${YELLOW}No projects succeeded.${NC}"
         fi
-        if [ -n "$FAILED" ]; then
-          echo "❌ Failed projects:$FAILED"
+
+        if [ ${#FAILED[@]} -gt 0 ]; then
+          echo -e "${RED}Failed projects:${NC} ${FAILED[*]}"
           exit 1
         fi
+
         echo
         echo "Built projects folder structure:"
         ls -R bin || true
+
     - name: Upload compiled binaries
       uses: actions/upload-artifact@v4
       with:
