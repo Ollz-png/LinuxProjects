@@ -13,42 +13,53 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v3
 
-      - name: Install dependencies
+      - name: Install build-essential
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config
+
+      - name: Auto-detect required dev packages
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libgtk-3-dev libvte-2.91-dev
+          set -eu -o pipefail
+          # List of pkg-config libs your projects might need
+          LIBS=(gtk+-3.0 vte-2.91 gtksourceview-3.0)
+          declare -A PKG_MAP=(
+            [gtk+-3.0]=libgtk-3-dev
+            [vte-2.91]=libvte-2.91-dev
+            [gtksourceview-3.0]=libgtksourceview-3.0-dev
+          )
+          TO_INSTALL=()
+          for lib in "${LIBS[@]}"; do
+            if ! pkg-config --exists "$lib"; then
+              TO_INSTALL+=("${PKG_MAP[$lib]}")
+            fi
+          done
+          if [ ${#TO_INSTALL[@]} -gt 0 ]; then
+            echo "Installing missing packages: ${TO_INSTALL[@]}"
+            sudo apt-get install -y "${TO_INSTALL[@]}"
+          else
+            echo "All required dev packages are already installed."
+          fi
 
       - name: Compile projects with summary
         shell: bash
         run: |
           set -eu -o pipefail
-
-          # Clean bin folder
           rm -rf bin
           mkdir -p bin
-
           SUCCEEDED=()
           FAILED=()
-
-          # Colors for output
           RED="\033[0;31m"
           GREEN="\033[0;32m"
           YELLOW="\033[0;33m"
           NC="\033[0m"
 
-          # Loop over top-level directories (exclude .github, bin, .git)
           while IFS= read -r -d '' dir; do
             dir="${dir#./}"
             [[ "$dir" = ".github" || "$dir" = "bin" || "$dir" = ".git" ]] && continue
-
             project="$dir"
             echo "=== Processing project: $project ==="
 
-            # Find all .cpp files (recursively), safely into an array
             mapfile -d '' -t CPP_FILES < <(find "$dir" -type f -name '*.cpp' -print0 || true)
-
-            # If no cpp files and no Makefile, skip
             if [ "${#CPP_FILES[@]}" -eq 0 ] && [ ! -f "$dir/Makefile" ]; then
               echo -e "${YELLOW}Skipping $project (no .cpp files or Makefile found)${NC}"
               continue
@@ -59,7 +70,6 @@ jobs:
             if [ -f "$dir/Makefile" ]; then
               echo "Building $project using Makefile..."
               if make -C "$dir"; then
-                # Move any top-level executables or project build outputs to bin/project
                 find "$dir" -maxdepth 1 -type f -executable -exec mv -t "bin/$project" -- {} + 2>/dev/null || true
                 SUCCEEDED+=("$project")
               else
@@ -67,70 +77,26 @@ jobs:
                 FAILED+=("$project")
               fi
             else
-              # -----------------------
-              # Build include search list
-              # -----------------------
-              # 1) Collect directories that contain header files (.h, .hpp) - unique, null-delimited
+              # Auto-collect include dirs
               readarray -d '' -t HEADER_DIRS < <(find "$dir" -type f \( -name '*.h' -o -name '*.hpp' \) -printf '%h\0' 2>/dev/null | sort -uz || true)
-
-              # 2) Prepare include-priority list:
-              #    a) project include (dir/include) first if exists
-              #    b) repo-level include (./include) next if exists
-              #    c) then the rest of HEADER_DIRS (unique), excluding duplicates
               INCLUDES_ORDER=()
 
-              # helper to push if not already present
               add_if_missing() {
                 local candidate="$1"
-                for e in "${INCLUDES_ORDER[@]}"; do
-                  if [ "$e" = "$candidate" ]; then
-                    return 0
-                  fi
-                done
+                for e in "${INCLUDES_ORDER[@]}"; do [[ "$e" = "$candidate" ]] && return 0; done
                 INCLUDES_ORDER+=("$candidate")
               }
 
-              # project include folder prioritized
-              if [ -d "$dir/include" ]; then
-                add_if_missing "$dir/include"
-              fi
+              [ -d "$dir/include" ] && add_if_missing "$dir/include"
+              [ -d "./include" ] && add_if_missing "$(realpath -m ./include)"
+              for hdr in "${HEADER_DIRS[@]}"; do [ -z "$hdr" ] && continue; add_if_missing "$(realpath -m "$hdr")"; done
 
-              # repo-level include (top-level) — still high priority after project include
-              if [ -d "./include" ]; then
-                add_if_missing "$(realpath -m ./include)"
-              fi
-
-              # add header dirs discovered (filter out duplicates)
-              for hdr in "${HEADER_DIRS[@]}"; do
-                # realpath to normalize; skip empty
-                [ -z "$hdr" ] && continue
-                hdr_real=$(realpath -m "$hdr")
-                add_if_missing "$hdr_real"
-              done
-
-              # If INCLUDES_ORDER empty (no headers found), still add project include and repo include if present
-              # (covers cases where headers may be generated later or in non-standard locations)
-              if [ "${#INCLUDES_ORDER[@]}" -eq 0 ]; then
-                [ -d "$dir/include" ] && INCLUDES_ORDER+=("$(realpath -m "$dir/include")")
-                [ -d "./include" ] && INCLUDES_ORDER+=("$(realpath -m ./include)")
-              fi
-
-              # Build INCLUDES_FLAGS array with -I prefix, preserving order (priority)
               INCLUDES_FLAGS=()
-              for p in "${INCLUDES_ORDER[@]}"; do
-                INCLUDES_FLAGS+=("-I" "$p")
-              done
+              for p in "${INCLUDES_ORDER[@]}"; do INCLUDES_FLAGS+=("-I" "$p"); done
 
-              # Debug: show includes being used (uncomment for debugging)
-              # printf 'Using include dirs for %s:\n' "$project"
-              # for i in "${INCLUDES_ORDER[@]}"; do printf '  %s\n' "$i"; done
-
-              # -----------------------
-              # Compile
-              # -----------------------
               OUT_BIN="bin/$project/$project"
               echo "Compiling $project from source..."
-              if g++ -std=c++17 -Wall "${INCLUDES_FLAGS[@]}" "${CPP_FILES[@]}" -o "$OUT_BIN" $(pkg-config --cflags --libs gtk+-3.0 vte-2.91); then
+              if g++ -std=c++17 -Wall "${INCLUDES_FLAGS[@]}" "${CPP_FILES[@]}" -o "$OUT_BIN" $(pkg-config --cflags --libs "${LIBS[@]}"); then
                 SUCCEEDED+=("$project")
               else
                 echo -e "${RED}g++ failed for $project${NC}"
@@ -139,7 +105,6 @@ jobs:
             fi
           done < <(find . -maxdepth 1 -mindepth 1 -type d -print0)
 
-          # Summary
           echo
           echo "=== Build Summary ==="
           if [ ${#SUCCEEDED[@]} -gt 0 ]; then
@@ -147,12 +112,10 @@ jobs:
           else
             echo -e "${YELLOW}No projects succeeded.${NC}"
           fi
-
           if [ ${#FAILED[@]} -gt 0 ]; then
             echo -e "${RED}Failed projects:${NC} ${FAILED[*]}"
             exit 1
           fi
-
           echo
           echo "Built projects folder structure:"
           ls -R bin || true
