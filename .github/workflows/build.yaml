@@ -1,10 +1,10 @@
-name: Build C++ Projects
+name: Build and Bundle C++ Projects
 
 on:
   push:
     branches:
       - master
-  workflow_dispatch:  # allows manual triggering
+  workflow_dispatch:
 
 jobs:
   build:
@@ -17,22 +17,30 @@ jobs:
     - name: Install dependencies
       run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libgtk-3-dev libvte-2.91-dev
 
-    - name: Build all C++ projects
+    - name: Compile C++ projects
       run: |
+        TIMESTAMP=$(date +%Y%m%d-%H%M%S)
         mkdir -p bin
         for dir in $(find . -maxdepth 2 -type d); do
           if compgen -G "$dir/src/*.cpp" > /dev/null; then
             project=$(basename $dir)
             mkdir -p bin/$project
-            g++ -std=c++17 -Wall $dir/src/*.cpp -o bin/$project/$project $(pkg-config --cflags --libs gtk+-3.0 vte-2.91)
+            if [ -f "$dir/Makefile" ]; then
+              echo "Building $project using its Makefile..."
+              make -C $dir
+              # move binary to bin/project
+              BIN_NAME=$(basename $(find $dir -maxdepth 1 -type f -executable))
+              mv $dir/$BIN_NAME bin/$project/
+            else
+              echo "Building $project with g++..."
+              g++ -std=c++17 -Wall $dir/src/*.cpp -o bin/$project/$project $(pkg-config --cflags --libs gtk+-3.0 vte-2.91)
+            fi
           fi
         done
-
-    - name: Zip binaries
-      run: zip -r compiled_projects.zip bin
+        zip -r compiled_projects_$TIMESTAMP.zip bin
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
-        name: compiled-projects
-        path: compiled_projects.zip
+        name: compiled-projects-$TIMESTAMP
+        path: compiled_projects_$TIMESTAMP.zip
