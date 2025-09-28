@@ -1,4 +1,4 @@
-name: Build and Bundle C++ Projects
+name: Build C++ Projects
 
 on:
   push:
@@ -11,27 +11,28 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repo
+    - name: Checkout repository
       uses: actions/checkout@v3
 
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y --no-install-recommends build-essential pkg-config libgtk-3-dev libvte-2.91-dev zip
+        sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libgtk-3-dev libvte-2.91-dev
 
-    - name: Compile & package projects
+    - name: Compile projects
       shell: bash
       run: |
         set -eu -o pipefail
 
-        TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-        ZIP_NAME="compiled_projects_${TIMESTAMP}.zip"
-
+        # Clean bin folder
+        rm -rf bin
         mkdir -p bin
+
         FAILED=""
         BUILT_ANY=0
 
-        # Loop over top-level directories (exclude .github, bin)
+        # Loop over top-level directories (exclude .github and bin)
         for dir in $(find . -maxdepth 1 -mindepth 1 -type d | sed 's|^\./||'); do
           [ "$dir" = ".github" ] && continue
           project=$(basename "$dir")
@@ -39,7 +40,6 @@ jobs:
 
           echo "=== Processing project: $project ==="
 
-          # Build using Makefile if present
           if [ -f "$dir/Makefile" ]; then
             echo "Building $project using Makefile..."
             if ! make -C "$dir"; then
@@ -47,7 +47,7 @@ jobs:
               FAILED="$FAILED $project"
               continue
             fi
-            # Move all executables in project root to bin/
+            # Move executables from project root to bin/<project>/
             find "$dir" -maxdepth 1 -type f -executable -exec mv {} "bin/$project/" \;
 
           else
@@ -76,17 +76,13 @@ jobs:
           exit 1
         fi
 
-        # Create a single zip containing bin/
-        echo "Creating zip $ZIP_NAME ..."
-        zip -r "$ZIP_NAME" bin -x "*/.git/*" >/dev/null
-
-        echo "Built and packaged into $ZIP_NAME"
+        echo "=== Build complete ==="
+        echo "Built projects (bin/<project>/):"
         ls -R bin || true
-        ls -l "$ZIP_NAME"
 
-    - name: Upload artifact
+    - name: Upload compiled binaries
       uses: actions/upload-artifact@v4
       with:
         name: compiled-projects-${{ github.run_number }}
-        path: compiled_projects_*.zip
+        path: bin
         if-no-files-found: error
