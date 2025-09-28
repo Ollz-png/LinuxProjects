@@ -1,14 +1,35 @@
-# Binaries
-**/bin/
-
-# Editor backups
-*~
-*.swp
+# =========================
+# Build files and objects
+# =========================
 *.o
+*.obj
+*.d
+*.exe
+*.out
+*.so
+*.a
+$(TARGET)
+build/
 
-# IDE/project configs
-**/.vscode/
-**/.idea/
+# =========================
+# IDE and editor files
+# =========================
+*.swp
+*.swo
+*.tmp
+*.bak
+*.log
+.idea/
+.vscode/
+*.code-workspace
 
-# FNF mods builds (optional)
-**/Builds/
+# =========================
+# OS-generated files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Backup files
+# =========================
+*~

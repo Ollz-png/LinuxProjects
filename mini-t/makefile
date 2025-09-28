@@ -1,35 +1,37 @@
-# Makefile for Mini-T Terminal Emulator
-# Ollz
-
-# Compiler
+# Compiler and flags
 CXX = g++
-CXXFLAGS = -std=c++17 -Wall -g
+CXXFLAGS = -std=c++17 -Wall -Wextra -Wshadow -g `pkg-config --cflags gtk+-3.0 vte-2.91`
+LDFLAGS = `pkg-config --libs gtk+-3.0 vte-2.91`
 
-# Sources
-SRC = main.cpp
+# Source files
+SRC := $(wildcard src/*.cpp)
+OBJ := $(SRC:.cpp=.o)
+DEP := $(OBJ:.o=.d)   # dependency files
 
-# Output directory
-BIN_DIR = bin
-TARGET = $(BIN_DIR)/mini-t
+# Include path
+INCLUDES = -Iinclude
 
-# Libraries via pkg-config
-LIBS = $(shell pkg-config --cflags --libs gtk+-3.0 vte-2.91)
+# Target
+TARGET = mini-t
 
-# Default target
+# Default rule
 all: $(TARGET)
 
-# Build the program
-$(TARGET): $(SRC)
-	mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $(SRC) -o $(TARGET) $(LIBS)
+# Compile object files with dependency generation
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) $(INCLUDES) -MMD -MP -c $< -o $@
+
+# Link executable
+$(TARGET): $(OBJ)
+	$(CXX) $(OBJ) -o $(TARGET) $(LDFLAGS)
+
+# Include dependency files if they exist
+-include $(DEP)
 
 # Clean build
 clean:
-	rm -rf $(BIN_DIR)
+	rm -f $(OBJ) $(DEP) $(TARGET)
 
-# Install to /usr/local/bin
-install: $(TARGET)
-	sudo cp $(TARGET) /usr/local/bin/mini-t
-	sudo chmod +x /usr/local/bin/mini-t
-
-.PHONY: all clean install
+# Run
+run: $(TARGET)
+	./$(TARGET)
