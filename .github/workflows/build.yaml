@@ -15,38 +15,132 @@ jobs:
       uses: actions/checkout@v3
 
     - name: Install dependencies
-      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libgtk-3-dev libvte-2.91-dev zip
-
-    - name: Compile changed projects
       run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends build-essential pkg-config libgtk-3-dev libvte-2.91-dev zip
+
+    - name: Compile & package projects
+      shell: bash
+      run: |
+        set -eu -o pipefail
+
+        # output zip name (unique per run)
         RUN_ID=${GITHUB_RUN_NUMBER}
         TIMESTAMP=$(date +%Y%m%d-%H%M%S)
         ZIP_NAME="compiled_projects_${TIMESTAMP}_${RUN_ID}.zip"
 
         mkdir -p bin
+        FAILED=""
+        BUILT_ANY=0
 
-        # Only compile directories with changes in src/ or Makefile
-        CHANGED_DIRS=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep -E 'src/|Makefile' | cut -d/ -f1 | sort -u)
-        
-        for dir in $CHANGED_DIRS; do
-          if [ -d "$dir/src" ] || [ -f "$dir/Makefile" ]; then
-            project=$(basename $dir)
-            mkdir -p bin/$project
+        # find candidate top-level project dirs (skip .github)
+        # we search top-level directories only to avoid recursing into nested deps
+        for dir in $(find . -maxdepth 2 -type d | sed 's|^\./||' | grep -vE '^(?:\.|\.github|bin)$' | sort -u); do
+          # normalize: skip . and the root repo folder
+          [ -z "$dir" ] && continue
+          # check for cpp files in src/ or root, or a Makefile
+          has_src=0
+          if compgen -G "$dir/src/*.cpp" > /dev/null 2>&1; then
+            has_src=1
+            SRC_GLOB="$dir/src/*.cpp"
+          elif compgen -G "$dir/*.cpp" > /dev/null 2>&1; then
+            has_src=1
+            SRC_GLOB="$dir/*.cpp"
+          fi
 
-            if [ -f "$dir/Makefile" ]; then
-              echo "Building $project using its Makefile..."
-              make -C $dir
-              BIN_NAME=$(basename $(find $dir -maxdepth 1 -type f -executable | head -n1))
-              mv $dir/$BIN_NAME bin/$project/
-            else
-              echo "Building $project with g++..."
-              g++ -std=c++17 -Wall $dir/src/*.cpp -o bin/$project/$project $(pkg-config --cflags --libs gtk+-3.0 vte-2.91)
+          if [ "$has_src" -eq 0 ] && [ ! -f "$dir/Makefile" ]; then
+            # nothing to build here
+            continue
+          fi
+
+          echo "=== Processing project: $dir ==="
+          project=$(basename "$dir")
+          mkdir -p "bin/$project"
+
+          # record executables present before build
+          pre_list=$(mktemp)
+          find "$dir" -maxdepth 2 -type f -executable -not -path "*/.git/*" | sort > "$pre_list" || true
+
+          # attempt build
+          if [ -f "$dir/Makefile" ]; then
+            echo "Building $project using Makefile..."
+            if ! make -C "$dir" 2>&1 | sed 's/^/  | /'; then
+              echo "Make failed for $project"
+              FAILED="$FAILED $project"
+              rm -f "$pre_list"
+              continue
+            fi
+          else
+            echo "Compiling $project from source ($SRC_GLOB)..."
+            # compile into a simple binary named after the project
+            out_bin="bin/$project/$project"
+            if ! g++ -std=c++17 -Wall $dir/src/*.cpp $dir/*.cpp -o "$out_bin" $(pkg-config --cflags --libs gtk+-3.0 vte-2.91) 2>&1 | sed 's/^/  | /'; then
+              echo "g++ failed for $project"
+              FAILED="$FAILED $project"
+              rm -f "$pre_list"
+              continue
             fi
           fi
+
+          # record executables present after build & find newly created ones
+          post_list=$(mktemp)
+          find "$dir" -maxdepth 2 -type f -executable -not -path "*/.git/*" | sort > "$post_list" || true
+
+          new_execs=$(comm -13 "$pre_list" "$post_list" || true)
+          rm -f "$pre_list" "$post_list"
+
+          if [ -z "$new_execs" ]; then
+            # If no new execs were detected, attempt to heuristically find likely binary names:
+            # - if Makefile built a file named same as project in project root
+            if [ -f "$dir/$project" ] && [ -x "$dir/$project" ]; then
+              mv "$dir/$project" "bin/$project/$project"
+              echo "Moved $dir/$project -> bin/$project/$project"
+              BUILT_ANY=1
+              continue
+            fi
+
+            # try typical build dirs
+            possible=$(find "$dir" -maxdepth 2 -type f -executable -not -path "*/.git/*" | grep -v "/bin/" || true)
+            if [ -n "$possible" ]; then
+              echo "Found executables (none newly created, but present):"
+              echo "$possible"
+              while IFS= read -r f; do
+                base=$(basename "$f")
+                mv "$f" "bin/$project/$base" || true
+                BUILT_ANY=1
+              done <<< "$possible"
+              continue
+            fi
+
+            echo "No executable found for $project after build; marking as failed."
+            FAILED="$FAILED $project"
+            continue
+          fi
+
+          # move any newly created executables into bin/<project>/
+          echo "$new_execs" | while IFS= read -r newf; do
+            [ -z "$newf" ] && continue
+            base=$(basename "$newf")
+            echo "Moving new executable $newf -> bin/$project/$base"
+            mv "$newf" "bin/$project/$base" || echo "Warn: failed to move $newf"
+            BUILT_ANY=1
+          done
         done
 
-        echo "Creating zip $ZIP_NAME..."
-        zip -r $ZIP_NAME bin
+        # final checks
+        if [ "$BUILT_ANY" -eq 0 ]; then
+          echo "ERROR: No binaries were produced for any project."
+          echo "Failed projects: $FAILED"
+          exit 1
+        fi
+
+        # Ensure zip contains exact bin/ content (no nested zip)
+        echo "Creating zip $ZIP_NAME ..."
+        zip -r "$ZIP_NAME" bin -x "*/.git/*" >/dev/null
+
+        echo "Built and packaged into $ZIP_NAME"
+        ls -R bin || true
+        ls -l "$ZIP_NAME"
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
