@@ -15,23 +15,27 @@ jobs:
       uses: actions/checkout@v3
 
     - name: Install dependencies
-      run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libgtk-3-dev libvte-2.91-dev zip
+      run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libgtk-3-dev libvte-2.91-dev zip
 
-    - name: Compile C++ projects
+    - name: Compile changed projects
       run: |
         RUN_ID=${GITHUB_RUN_NUMBER}
         TIMESTAMP=$(date +%Y%m%d-%H%M%S)
         ZIP_NAME="compiled_projects_${TIMESTAMP}_${RUN_ID}.zip"
 
         mkdir -p bin
-        for dir in $(find . -maxdepth 2 -type d); do
-          if compgen -G "$dir/src/*.cpp" > /dev/null; then
+
+        # Only compile directories with changes in src/ or Makefile
+        CHANGED_DIRS=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep -E 'src/|Makefile' | cut -d/ -f1 | sort -u)
+        
+        for dir in $CHANGED_DIRS; do
+          if [ -d "$dir/src" ] || [ -f "$dir/Makefile" ]; then
             project=$(basename $dir)
             mkdir -p bin/$project
+
             if [ -f "$dir/Makefile" ]; then
               echo "Building $project using its Makefile..."
               make -C $dir
-              # move first executable found to bin/project/
               BIN_NAME=$(basename $(find $dir -maxdepth 1 -type f -executable | head -n1))
               mv $dir/$BIN_NAME bin/$project/
             else
