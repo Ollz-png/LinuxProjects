@@ -7,8 +7,8 @@ on:
   workflow_dispatch:
 
 env:
-  VERBOSE_BUILD: "false"  # set true to see full g++/make output
-  FAST_FAIL: "false"      # set true to stop on first failure
+  VERBOSE_BUILD: "false"  # set to "true" to stream full make/g++ output
+  FAST_FAIL: "false"      # set to "true" to stop on first failure
 
 jobs:
   build:
@@ -30,44 +30,94 @@ jobs:
           echo "::endgroup::"
 
       - name: Install dependencies from Makefiles
+        shell: bash
         run: |
           set -eu
           echo "::group::🔍 Scanning Makefiles for pkg-config modules"
-          MODULES=$(grep -h -o "pkg-config[^)]*)" $(find . -name Makefile) \
-            | sed -E 's/.*pkg-config[^ ]* (.*)\)/\1/' \
-            | tr ' ' '\n' | sort -u || true
-          if [ -z "$MODULES" ]; then
-            echo "⚠️ No pkg-config modules detected"
+
+          # Collect all pkg-config(...) occurrences from all Makefiles safely
+          MODULE_MATCHES=()
+          while IFS= read -r -d '' mf; do
+            # grep each Makefile for occurrences like: pkg-config ... )
+            while IFS= read -r match; do
+              MODULE_MATCHES+=("$match")
+            done < <(grep -h -o 'pkg-config[^)]*)' "$mf" 2>/dev/null || true)
+          done < <(find . -name Makefile -print0)
+
+          if [ ${#MODULE_MATCHES[@]} -eq 0 ]; then
+            echo "⚠️ No pkg-config patterns found in Makefiles"
             echo "::endgroup::"
             exit 0
           fi
+
+          # Normalize and deduplicate module names
+          declare -A MODULES_MAP=()
+          for m in "${MODULE_MATCHES[@]}"; do
+            # remove everything up to "pkg-config" and strip trailing ')'
+            mods=$(printf '%s\n' "$m" | sed -E 's/.*pkg-config[^ ]* *//; s/\)//')
+            # remove common flags --cflags and --libs (they're not module names)
+            mods=$(printf '%s\n' "$mods" | sed -E 's/--(cflags|libs)//g')
+            for mod in $mods; do
+              # ignore empty tokens
+              [ -z "$mod" ] && continue
+              MODULES_MAP["$mod"]=1
+            done
+          done
+
+          # Build MODULES list
+          MODULES=()
+          for k in "${!MODULES_MAP[@]}"; do
+            MODULES+=("$k")
+          done
+          # sort for stable output
+          IFS=$'\n' MODULES=($(sort <<<"${MODULES[*]}"))
+          unset IFS
+
+          if [ ${#MODULES[@]} -eq 0 ]; then
+            echo "⚠️ No pkg-config modules extracted from Makefiles"
+            echo "::endgroup::"
+            exit 0
+          fi
+
           echo "📦 Detected pkg-config modules:"
-          for m in $MODULES; do echo "  - $m"; done
+          for m in "${MODULES[@]}"; do
+            echo "  - $m"
+          done
           echo "::endgroup::"
 
+          # Map modules to apt packages (extend this map as needed)
           PKGS=()
-          for m in $MODULES; do
+          for m in "${MODULES[@]}"; do
             case "$m" in
               gtk+-3.0) PKGS+=("libgtk-3-dev") ;;
               vte-2.91) PKGS+=("libvte-2.91-dev") ;;
               gtksourceview-4) PKGS+=("libgtksourceview-4-dev") ;;
-              *) echo "⚠️ Unknown module: $m (no apt mapping)" ;;
+              *) echo "⚠️ Unknown module: $m (no apt mapping configured)" ;;
             esac
           done
 
+          # Deduplicate PKGS
           if [ ${#PKGS[@]} -gt 0 ]; then
-            echo "::group::📦 Installing extra packages"
+            echo "::group::📦 Installing extra packages from Makefiles"
+            # unique
+            IFS=$'\n' PKGS=($(sort -u <<<"${PKGS[*]}"))
+            unset IFS
             echo "Will install: ${PKGS[*]}"
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends "${PKGS[@]}"
             echo "::endgroup::"
+          else
+            echo "⚠️ No additional apt packages to install"
           fi
 
       - name: Compile projects with summary
         shell: bash
         run: |
           set -eu -o pipefail
+
+          # Make logs/bin dirs
           mkdir -p bin logs
+
           REPORT="build-report.txt"
           echo "📊 Advanced Build Report - $(date)" > "$REPORT"
           echo "" >> "$REPORT"
@@ -75,18 +125,28 @@ jobs:
           SUCCEEDED=() FAILED=() SKIPPED=()
           RED="\033[0;31m" GREEN="\033[0;32m" YELLOW="\033[0;33m" BLUE="\033[0;34m" NC="\033[0m"
 
+          # Make globbing safe: empty globs expand to nothing
+          shopt -s nullglob
+
+          # iterate top-level directories (exclude .git, .github, bin)
           while IFS= read -r -d '' dir; do
             dir="${dir#./}"
             [[ "$dir" = ".github" || "$dir" = "bin" || "$dir" = ".git" ]] && continue
+
             project="$dir"
             PROJECT_LOG="logs/${project}.log"
-            mkdir -p "logs/$project"
-            echo "::group::🔨 Building project: $project"
+            mkdir -p "$(dirname "$PROJECT_LOG")"
 
+            echo "::group::🔨 Building project: $project"
+            echo "---- PROJECT: $project ----" > "$PROJECT_LOG"
+
+            # collect sources
             mapfile -d '' -t CPP_FILES < <(find "$dir" -type f -name '*.cpp' -print0 || true)
+
             if [ "${#CPP_FILES[@]}" -eq 0 ] && [ ! -f "$dir/Makefile" ]; then
-              echo -e "⚠️ ${YELLOW}Skipping${NC}: $project" | tee -a "$REPORT" > "$PROJECT_LOG"
+              echo -e "⚠️  ${YELLOW}Skipping${NC}: $project (no .cpp files or Makefile found)" | tee -a "$REPORT" "$PROJECT_LOG"
               SKIPPED+=("$project")
+              echo "SKIPPED: $project" >> "$REPORT"
               echo "::endgroup::"
               continue
             fi
@@ -95,8 +155,9 @@ jobs:
             START_TIME=$(date +%s.%N)
 
             if [ -f "$dir/Makefile" ]; then
-              echo "🛠️ Building with Makefile..." | tee -a "$PROJECT_LOG"
-              if [ "$VERBOSE_BUILD" = "true" ]; then
+              echo "🛠️  Building with Makefile..." | tee -a "$PROJECT_LOG"
+              if [ "${VERBOSE_BUILD:-false}" = "true" ]; then
+                # preserve pipe status to detect make exit code
                 make -C "$dir" 2>&1 | tee -a "$PROJECT_LOG"
                 MAKE_STATUS=${PIPESTATUS[0]}
               else
@@ -105,65 +166,91 @@ jobs:
               fi
 
               if [ $MAKE_STATUS -eq 0 ]; then
+                # move top-level executables into bin/project
                 find "$dir" -maxdepth 1 -type f -executable -exec mv -t "bin/$project" -- {} + 2>/dev/null || true
                 echo -e "✅ ${GREEN}Build succeeded${NC}: $project" | tee -a "$REPORT" "$PROJECT_LOG"
+                echo "SUCCEEDED: $project" >> "$REPORT"
                 SUCCEEDED+=("$project")
               else
-                echo -e "❌ ${RED}Build failed${NC}: $project" | tee -a "$REPORT" "$PROJECT_LOG"
+                echo -e "❌ ${RED}Build failed${NC}: $project (Make returned $MAKE_STATUS)" | tee -a "$REPORT" "$PROJECT_LOG"
+                echo "FAILED: $project" >> "$REPORT"
                 FAILED+=("$project")
-                [ "$FAST_FAIL" = "true" ] && exit 1
+                if [ "${FAST_FAIL:-false}" = "true" ]; then
+                  echo "FAST_FAIL set, stopping early" >> "$PROJECT_LOG"
+                  echo "::endgroup::"
+                  exit 1
+                fi
               fi
+
             else
-              echo "🛠️ Compiling sources directly..." | tee -a "$PROJECT_LOG"
+              echo "🛠️  Compiling sources directly..." | tee -a "$PROJECT_LOG"
               OUT_BIN="bin/$project/$project"
+
               readarray -d '' -t HEADER_DIRS < <(find "$dir" -type f \( -name '*.h' -o -name '*.hpp' \) -printf '%h\0' 2>/dev/null | sort -uz || true)
 
               INCLUDES_ORDER=()
               add_if_missing() { local candidate="$1"; for e in "${INCLUDES_ORDER[@]}"; do [ "$e" = "$candidate" ] && return 0; done; INCLUDES_ORDER+=("$candidate"); }
+
               [ -d "$dir/include" ] && add_if_missing "$dir/include"
               [ -d "./include" ] && add_if_missing "$(realpath -m ./include)"
-              for hdr in "${HEADER_DIRS[@]}"; do [ -z "$hdr" ] && continue; add_if_missing "$(realpath -m "$hdr")"; done
-              INCLUDES_FLAGS=(); for p in "${INCLUDES_ORDER[@]}"; do INCLUDES_FLAGS+=("-I" "$p"); done
+              for hdr in "${HEADER_DIRS[@]}"; do
+                [ -z "$hdr" ] && continue
+                hdr_real=$(realpath -m "$hdr")
+                add_if_missing "$hdr_real"
+              done
 
-              if [ "$VERBOSE_BUILD" = "true" ]; then
+              INCLUDES_FLAGS=()
+              for p in "${INCLUDES_ORDER[@]}"; do
+                INCLUDES_FLAGS+=("-I" "$p")
+              done
+
+              if [ "${VERBOSE_BUILD:-false}" = "true" ]; then
                 g++ -std=c++17 -Wall "${INCLUDES_FLAGS[@]}" "${CPP_FILES[@]}" -o "$OUT_BIN" $(pkg-config --cflags --libs gtk+-3.0 vte-2.91 gtksourceview-4) 2>&1 | tee -a "$PROJECT_LOG"
                 GCC_STATUS=${PIPESTATUS[0]}
               else
-                g++ -std=c++17 -Wall "${INCLUDES_FLAGS[@]}" "${CPP_FILES[@]}" -o "$OUT_BIN" $(pkg-config --cflags --libs gtk+-3.0 vte-2.91 gtksourceview-4) >/dev/null 2>&1
+                g++ -std=c++17 -Wall "${INCLUDES_FLAGS[@]}" "${CPP_FILES[@]}" -o "$OUT_BIN" $(pkg-config --cflags --libs gtk+-3.0 vte-2.91 gtksourceview-4) >/dev/null 2>&1 || true
                 GCC_STATUS=$?
               fi
 
               if [ $GCC_STATUS -eq 0 ]; then
                 echo -e "✅ ${GREEN}Compiled successfully${NC}: $project" | tee -a "$REPORT" "$PROJECT_LOG"
+                echo "SUCCEEDED: $project" >> "$REPORT"
                 SUCCEEDED+=("$project")
               else
-                echo -e "❌ ${RED}g++ compilation failed${NC}: $project" | tee -a "$REPORT" "$PROJECT_LOG"
+                echo -e "❌ ${RED}g++ compilation failed${NC}: $project (exit $GCC_STATUS)" | tee -a "$REPORT" "$PROJECT_LOG"
+                echo "FAILED: $project" >> "$REPORT"
                 FAILED+=("$project")
-                [ "$FAST_FAIL" = "true" ] && exit 1
+                if [ "${FAST_FAIL:-false}" = "true" ]; then
+                  echo "FAST_FAIL set, stopping early" >> "$PROJECT_LOG"
+                  echo "::endgroup::"
+                  exit 1
+                fi
               fi
             fi
 
             END_TIME=$(date +%s.%N)
-            DURATION=$(echo "$END_TIME - $START_TIME" | bc)
+            # use awk for decimal subtraction (always available)
+            DURATION=$(awk -v e="$END_TIME" -v s="$START_TIME" 'BEGIN{printf "%.3f", e - s}')
             echo "⏱ Build time: ${DURATION}s" | tee -a "$REPORT" "$PROJECT_LOG"
-            echo "::endgroup::"
 
+            echo "::endgroup::"
           done < <(find . -maxdepth 1 -mindepth 1 -type d -print0)
 
-          # Summary
+          # Summary in report
           echo "" >> "$REPORT"
           echo "=== Build Summary ===" >> "$REPORT"
           [ ${#SUCCEEDED[@]} -gt 0 ] && echo "✅ Succeeded: ${SUCCEEDED[*]}" >> "$REPORT"
           [ ${#FAILED[@]} -gt 0 ] && echo "❌ Failed: ${FAILED[*]}" >> "$REPORT"
           [ ${#SKIPPED[@]} -gt 0 ] && echo "⚠️ Skipped: ${SKIPPED[*]}" >> "$REPORT"
 
-          # Pretty tree with size & timestamp
+          # Pretty tree with size & timestamp appended to report
           echo "" >> "$REPORT"
           echo "📂 Built projects folder structure:" | tee -a "$REPORT"
 
           show_tree() {
             local dir="$1"
             local prefix="$2"
+            shopt -s nullglob
             local files=("$dir"/*)
             local count=${#files[@]}
             local i=0
@@ -171,21 +258,38 @@ jobs:
               ((i++))
               local connector="├──"
               local new_prefix="$prefix│   "
-              [ $i -eq $count ] && connector="└──" && new_prefix="$prefix    "
+              if [ $i -eq $count ]; then
+                connector="└──"
+                new_prefix="$prefix    "
+              fi
+
               if [ -d "$f" ]; then
                 echo -e "${prefix}${connector} 📁 ${BLUE}$(basename "$f")${NC}" | tee -a "$REPORT"
                 show_tree "$f" "$new_prefix"
               else
-                SIZE=$(du -h "$f" | cut -f1)
-                DATE=$(date -r "$f" "+%Y-%m-%d %H:%M:%S")
-                echo -e "${prefix}${connector} 📄 $(basename "$f") (${SIZE}, $DATE)" | tee -a "$REPORT"
+                if [ -e "$f" ]; then
+                  SIZE=$(du -h "$f" | cut -f1)
+                  DATE=$(date -r "$f" "+%Y-%m-%d %H:%M:%S")
+                  echo -e "${prefix}${connector} 📄 $(basename "$f") (${SIZE}, $DATE)" | tee -a "$REPORT"
+                else
+                  echo -e "${prefix}${connector} ⚠️ missing $(basename "$f")" | tee -a "$REPORT"
+                fi
               fi
             done
           }
 
-          [ -d bin ] && show_tree bin "" || echo "⚠️ No bin folder generated" | tee -a "$REPORT"
+          if [ -d bin ]; then
+            echo -e "📁 ${BLUE}bin${NC}" | tee -a "$REPORT"
+            show_tree bin ""
+          else
+            echo "⚠️ No bin folder generated" | tee -a "$REPORT"
+          fi
 
-          [ ${#FAILED[@]} -gt 0 ] && exit 1
+          # upload-friendly exit: fail if any failed
+          if [ ${#FAILED[@]} -gt 0 ]; then
+            echo "Some projects failed: ${FAILED[*]}" >> "$REPORT"
+            exit 1
+          fi
 
       - name: Upload compiled binaries
         uses: actions/upload-artifact@v4
