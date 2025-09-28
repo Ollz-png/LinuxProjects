@@ -24,117 +24,59 @@ jobs:
       run: |
         set -eu -o pipefail
 
-        # output zip name (unique per run)
-        RUN_ID=${GITHUB_RUN_NUMBER}
         TIMESTAMP=$(date +%Y%m%d-%H%M%S)
-        ZIP_NAME="compiled_projects_${TIMESTAMP}_${RUN_ID}.zip"
+        ZIP_NAME="compiled_projects_${TIMESTAMP}.zip"
 
         mkdir -p bin
         FAILED=""
         BUILT_ANY=0
 
-        # find candidate top-level project dirs (skip .github)
-        # we search top-level directories only to avoid recursing into nested deps
-        for dir in $(find . -maxdepth 2 -type d | sed 's|^\./||' | grep -vE '^(?:\.|\.github|bin)$' | sort -u); do
-          # normalize: skip . and the root repo folder
-          [ -z "$dir" ] && continue
-          # check for cpp files in src/ or root, or a Makefile
-          has_src=0
-          if compgen -G "$dir/src/*.cpp" > /dev/null 2>&1; then
-            has_src=1
-            SRC_GLOB="$dir/src/*.cpp"
-          elif compgen -G "$dir/*.cpp" > /dev/null 2>&1; then
-            has_src=1
-            SRC_GLOB="$dir/*.cpp"
-          fi
-
-          if [ "$has_src" -eq 0 ] && [ ! -f "$dir/Makefile" ]; then
-            # nothing to build here
-            continue
-          fi
-
-          echo "=== Processing project: $dir ==="
+        # Loop over top-level directories (exclude .github, bin)
+        for dir in $(find . -maxdepth 1 -mindepth 1 -type d | sed 's|^\./||'); do
+          [ "$dir" = ".github" ] && continue
           project=$(basename "$dir")
           mkdir -p "bin/$project"
 
-          # record executables present before build
-          pre_list=$(mktemp)
-          find "$dir" -maxdepth 2 -type f -executable -not -path "*/.git/*" | sort > "$pre_list" || true
+          echo "=== Processing project: $project ==="
 
-          # attempt build
+          # Build using Makefile if present
           if [ -f "$dir/Makefile" ]; then
             echo "Building $project using Makefile..."
-            if ! make -C "$dir" 2>&1 | sed 's/^/  | /'; then
+            if ! make -C "$dir"; then
               echo "Make failed for $project"
               FAILED="$FAILED $project"
-              rm -f "$pre_list"
               continue
             fi
+            # Move all executables in project root to bin/
+            find "$dir" -maxdepth 1 -type f -executable -exec mv {} "bin/$project/" \;
+
           else
-            echo "Compiling $project from source ($SRC_GLOB)..."
-            # compile into a simple binary named after the project
-            out_bin="bin/$project/$project"
-            if ! g++ -std=c++17 -Wall $dir/src/*.cpp $dir/*.cpp -o "$out_bin" $(pkg-config --cflags --libs gtk+-3.0 vte-2.91) 2>&1 | sed 's/^/  | /'; then
+            # Compile all .cpp files recursively
+            CPP_FILES=$(find "$dir" -type f -name "*.cpp")
+            if [ -z "$CPP_FILES" ]; then
+              echo "No .cpp files found for $project"
+              FAILED="$FAILED $project"
+              continue
+            fi
+            OUT_BIN="bin/$project/$project"
+            echo "Compiling $project from source..."
+            if ! g++ -std=c++17 -Wall $CPP_FILES -o "$OUT_BIN" $(pkg-config --cflags --libs gtk+-3.0 vte-2.91); then
               echo "g++ failed for $project"
               FAILED="$FAILED $project"
-              rm -f "$pre_list"
               continue
             fi
           fi
 
-          # record executables present after build & find newly created ones
-          post_list=$(mktemp)
-          find "$dir" -maxdepth 2 -type f -executable -not -path "*/.git/*" | sort > "$post_list" || true
-
-          new_execs=$(comm -13 "$pre_list" "$post_list" || true)
-          rm -f "$pre_list" "$post_list"
-
-          if [ -z "$new_execs" ]; then
-            # If no new execs were detected, attempt to heuristically find likely binary names:
-            # - if Makefile built a file named same as project in project root
-            if [ -f "$dir/$project" ] && [ -x "$dir/$project" ]; then
-              mv "$dir/$project" "bin/$project/$project"
-              echo "Moved $dir/$project -> bin/$project/$project"
-              BUILT_ANY=1
-              continue
-            fi
-
-            # try typical build dirs
-            possible=$(find "$dir" -maxdepth 2 -type f -executable -not -path "*/.git/*" | grep -v "/bin/" || true)
-            if [ -n "$possible" ]; then
-              echo "Found executables (none newly created, but present):"
-              echo "$possible"
-              while IFS= read -r f; do
-                base=$(basename "$f")
-                mv "$f" "bin/$project/$base" || true
-                BUILT_ANY=1
-              done <<< "$possible"
-              continue
-            fi
-
-            echo "No executable found for $project after build; marking as failed."
-            FAILED="$FAILED $project"
-            continue
-          fi
-
-          # move any newly created executables into bin/<project>/
-          echo "$new_execs" | while IFS= read -r newf; do
-            [ -z "$newf" ] && continue
-            base=$(basename "$newf")
-            echo "Moving new executable $newf -> bin/$project/$base"
-            mv "$newf" "bin/$project/$base" || echo "Warn: failed to move $newf"
-            BUILT_ANY=1
-          done
+          BUILT_ANY=1
         done
 
-        # final checks
         if [ "$BUILT_ANY" -eq 0 ]; then
           echo "ERROR: No binaries were produced for any project."
-          echo "Failed projects: $FAILED"
+          echo "Failed projects:$FAILED"
           exit 1
         fi
 
-        # Ensure zip contains exact bin/ content (no nested zip)
+        # Create a single zip containing bin/
         echo "Creating zip $ZIP_NAME ..."
         zip -r "$ZIP_NAME" bin -x "*/.git/*" >/dev/null
 
